@@ -1,97 +1,114 @@
 # Design and Implementation of UART using Verilog
 
-A complete, self-contained implementation of a Universal Asynchronous Receiver-Transmitter (UART) core written in Verilog HDL. The project includes independent transmitter and receiver modules, an integrated top-level module, testbench simulation, and waveform verification results.
+A synthesizable, parameterized implementation of a **Universal Asynchronous Receiver-Transmitter (UART)** core in Verilog HDL. The core features a dedicated baud rate generator with 16× oversampling, an asynchronous receiver with metastability protection, a frame transmitter, and a self-checking testbench.
 
 ---
 
-## Architecture Overview
+## Key Features
 
-UART is a serial communication protocol that transmits and receives data asynchronously without requiring a shared clock line between devices.
+- **Full-Duplex Communication**: Independent transmitter (`uart_tx`) and receiver (`uart_rx`) modules.
+- **Configurable Timing**: Top-level parameterized `CLK_FREQ` (e.g., 50 MHz) and `BAUD_RATE` (e.g., 115200, 9600).
+- **Standard Frame Format (8-N-1)**:
+  - 1 Start Bit (`0`)
+  - 8 Data Bits (Transmitted LSB-first)
+  - No Parity
+  - 1 Stop Bit (`1`)
+- **16× Oversampling Receiver**: Samples serial data at the midpoint of each bit interval (tick 7 for start bit, tick 15 for data/stop bits) for high noise margin.
+- **Metastability Protection**: Two-stage flip-flop synchronizer on the asynchronous `rx` input pin.
+- **Self-Checking Testbench**: Validates loopback integrity, corner data patterns, and independent serial reception without timing drift.
 
-- **Frame Format**: 1 Start Bit (low) + 8 Data Bits (LSB first) + 1 Stop Bit (high)
-- **Top Module**: `uart_top` integrates both transmitter (`uart_tx`) and receiver (`uart_rx`) to support full-duplex serial transmission.
+---
+
+## Block Diagram
 
 ```
-                  +-----------------------------------+
-                  |             uart_top              |
-                  |                                   |
-    data[7:0] --->|  +-----------+     +-----------+  |---> rx_data[7:0]
-        start --->|  |  uart_tx  |     |  uart_rx  |  |---> rx_done
-      tx_done <---|  |           |     |           |<---| rs232_in
-     rs232_tx <---|  +-----------+     +-----------+  |
-                  |         ^                ^        |
-                  |         | clk, rst_n     |        |
-                  +-----------------------------------+
+                              +-------------------------------------------------------+
+                              |                       uart_top                        |
+                              |                                                       |
+                              |   +-----------------------------------------------+   |
+                              |   |                 baud_rate_gen                 |   |
+                              |   |                                               |   |
+                              |   |   tx_en (1x baud)             rx_en (16x baud)|   |
+                              |   +-------+-------------------------------+-------+   |
+                              |           |                               |           |
+                              |           v                               v           |
+    wr_enb ------------------>|   +---------------+               +---------------+   |
+    data_in [7:0] ----------->|   |    uart_tx    |               |    uart_rx    |<--|--- rx
+    tx_busy <-----------------|---|               |               |               |---|---> data_out [7:0]
+    tx_done <-----------------|---|               |               |               |---|---> rx_done
+    tx <----------------------|---+---------------+               +---------------+   |
+                              |                                                       |
+                              +-------------------------------------------------------+
 ```
 
 ---
 
-## Detailed Module Descriptions
+## Module Descriptions
 
-### 1. UART Transmitter (`src/uart_tx.v`)
-- **Purpose**: Converts parallel 8-bit input data into a serial bitstream by prepending a start bit, transmitting 8 data bits (LSB-first), and appending a stop bit.
-- **Operation**:
-  - **State Machine**: Initiates transmission upon assertion of the `start` signal.
-  - **Baud Rate Control**: Employs a baud counter (`baud_cnt`) configured to count 30 clock cycles per bit for simulation (configurable for standard physical baud rates such as 9600, 115200, etc.).
-  - **Transmission Sequence**:
-    - **Start Bit**: Drives `rs232_tx` low for one bit duration.
-    - **Data Bits**: Transmits bits `[0]` through `[7]` sequentially on each bit interval.
-    - **Stop Bit**: Returns `rs232_tx` high and asserts `done`.
+### 1. Baud Rate Generator (`baud_rate_gen.v`)
+- **Parameters**: `CLK_FREQ`, `BAUD_RATE`.
+- **Function**: Divides the master clock into two enable tick pulses:
+  - `tx_en`: Pulses once per bit duration ($T_{\text{bit}} = \frac{\text{CLK\_FREQ}}{\text{BAUD\_RATE}}$).
+  - `rx_en`: Pulses 16 times per bit duration ($T_{\text{sample}} = \frac{\text{CLK\_FREQ}}{\text{BAUD\_RATE} \times 16}$) for receiver oversampling.
 
-### 2. UART Receiver (`src/uart_rx.v`)
-- **Purpose**: Converts an incoming serial bitstream (`rs232`) into parallel 8-bit output data (`rx_data`).
+### 2. UART Transmitter (`uart_tx.v`)
+- **Finite State Machine**: `IDLE` $\rightarrow$ `START` $\rightarrow$ `DATA` $\rightarrow$ `STOP`.
 - **Operation**:
-  - **Synchronization**: Uses a 2-stage flip-flop synchronizer to mitigate metastability from asynchronous line transitions.
-  - **Start Bit Detection**: Senses the falling edge denoting the beginning of a frame.
-  - **Mid-Bit Sampling**: Samples data at the midpoint of each bit duration (baud count = 15) to maximize noise margins.
-  - **Reception Sequence**:
-    - Validates start bit and captures 8 data bits into parallel register `rx_data`.
-    - Asserts `done` upon completion of frame reception.
+  - Waits for `wr_enb` in `IDLE`, latches `data_in`, and asserts `tx_busy`.
+  - Transmits a start bit (`0`) on the next `tx_en` pulse.
+  - Shifts out 8 data bits sequentially (LSB first) on each subsequent `tx_en` tick.
+  - Transmits the stop bit (`1`), asserts `tx_done` for 1 cycle, and clears `tx_busy`.
 
-### 3. Top-Level Module (`src/uart_top.v`)
-- **Purpose**: Integrates the transmitter and receiver modules into a unified full-duplex communication interface.
+### 3. UART Receiver (`uart_rx.v`)
+- **Finite State Machine**: `IDLE` $\rightarrow$ `START` $\rightarrow$ `DATA` $\rightarrow$ `STOP`.
 - **Operation**:
-  - Instantiates `uart_tx` and `uart_rx`.
-  - Exposes parallel data buses, serial RX/TX lines, and completion status flags (`tx_done`, `rx_done`).
+  - Synchronizes asynchronous `rx` through two flip-flop stages (`rx_sync1`, `rx_sync2`).
+  - Detects a falling edge in `IDLE` and transitions to `START`.
+  - Samples at the midpoint of the start bit (tick 7). If the line is still low, transitions to `DATA` (otherwise rejects as a noise glitch and returns to `IDLE`).
+  - Samples at the center of each of the 8 data bits (tick 15) and shifts them into `shift_reg`.
+  - In `STOP`, latches the complete byte into `data_out` and asserts `rx_done` for 1 cycle.
 
-### 4. Testbench (`src/tb_uart.v`)
-- **Purpose**: Simulates and validates the transmission and reception behavior.
-- **Operation**:
-  - Generates a 50 MHz clock signal (20 ns clock period).
-  - Drives reset, stimulus byte (e.g., `8'h55`), and initiates transmission.
-  - Monitors serial line activity and verifies received data.
+### 4. Top-Level Module (`uart_top.v`)
+- Interconnects the baud generator, transmitter, and receiver.
+- Passes parameters down cleanly from top-level to submodules.
 
 ---
 
-## Simulation & Experimental Results
+## Verification & Simulation
 
-The design has been verified through simulation with the following waveform observations:
+The testbench (`uart_top_tb.v`) includes 4 automated test scenarios:
 
-### UART Transmitter Simulation
-The waveform demonstrates sequential framing: start bit (low), 8 data bits in LSB-first order, and final stop bit (high):
+| Case | Test Description | Input Pattern | Result |
+| :---: | :--- | :---: | :---: |
+| **Case 1** | **Reset & Idle State Check** | N/A | **PASS** |
+| **Case 2** | **Single Byte Loopback** | `0xA5` (`8'b10100101`) | **PASS** |
+| **Case 3** | **Boundary & Corner Cases** | `0x00`, `0xFF`, `0x5A` | **PASS** |
+| **Case 4** | **Manual External RX Injection** | `0xD2` (`8'b11010010`) | **PASS** |
 
-![UART Transmitter Waveform](docs/images/tx_waveform.png)
+### Simulation Waveform
 
-### UART Receiver Simulation
-The receiver synchronizes with the incoming falling edge, samples each bit at midpoint, and registers the received byte with `rx_done` asserted:
+Simulation performed in Vivado XSim (50 MHz clock, 115200 baud):
 
-![UART Receiver Waveform](docs/images/rx_waveform.png)
+![UART Simulation Waveform](uart_simulation.png)
 
 ---
 
-## Directory Structure
+## File Structure
 
 ```
-├── docs/
-│   └── images/
-│       ├── rx_waveform.png
-│       └── tx_waveform.png
-├── src/
-│   ├── tb_uart.v
-│   ├── uart_rx.v
-│   ├── uart_top.v
-│   └── uart_tx.v
-├── .gitignore
-├── LICENSE
-└── README.md
+├── baud_rate_gen.v      # Parameterized baud rate generator (1x TX, 16x RX)
+├── uart_tx.v            # UART transmitter with FSM
+├── uart_rx.v            # 16x oversampling UART receiver with synchronizer
+├── uart_top.v           # Top-level integration module
+├── uart_top_tb.v        # Self-checking testbench
+├── uart_simulation.png  # Simulation waveform capture
+├── .gitignore           # Git ignore for simulation/EDA artifacts
+├── LICENSE              # MIT License
+└── README.md            # Project documentation
 ```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
