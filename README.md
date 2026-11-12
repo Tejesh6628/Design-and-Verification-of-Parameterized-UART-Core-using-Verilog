@@ -1,4 +1,4 @@
-# Design and Implementation of UART using Verilog
+# Design and Verification of Parameterized UART Core using Verilog
 
 A synthesizable, parameterized implementation of a **Universal Asynchronous Receiver-Transmitter (UART)** core in Verilog HDL. The core features a dedicated baud rate generator with 16× oversampling, an asynchronous receiver with metastability protection, a frame transmitter, and a self-checking testbench.
 
